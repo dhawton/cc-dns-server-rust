@@ -10,6 +10,120 @@ use std::net::Ipv4Addr;
 use std::net::UdpSocket;
 use fixed_buffer::FixedBuf;
 
+fn read_dns_name(data: &[u8], offset: &mut usize) -> Result<String, String> {
+    let mut labels: Vec<String> = Vec::new();
+    let mut jumped = false;
+    let mut jump_offset = 0usize;
+    let mut pos = *offset;
+
+    for _ in 0..128 {
+        if pos >= data.len() {
+            return Err("unexpected end of data reading name".into());
+        }
+        let len_byte = data[pos];
+
+        if len_byte == 0 {
+            if !jumped {
+                *offset = pos + 1;
+            }
+            return Ok(labels.join("."));
+        }
+
+        // Compression pointer
+        if len_byte >= 0xC0 {
+            if pos + 1 >= data.len() {
+                return Err("truncated compression pointer".into());
+            }
+            let pointer = ((len_byte as usize & 0x3F) << 8) | data[pos + 1] as usize;
+            if !jumped {
+                jump_offset = pos + 2;
+            }
+            jumped = true;
+            pos = pointer;
+            continue;
+        }
+
+        let label_len = len_byte as usize;
+        pos += 1;
+        if pos + label_len > data.len() {
+            return Err("label extends past end of data".into());
+        }
+        let label = std::str::from_utf8(&data[pos..pos + label_len])
+            .map_err(|e| format!("invalid UTF-8 in label: {e}"))?;
+        labels.push(label.to_string());
+        pos += label_len;
+    }
+
+    if jumped {
+        *offset = jump_offset;
+    }
+    Err("too many labels (possible loop)".into())
+}
+
+fn parse_dns_message(data: &[u8]) -> Result<DnsMessage, String> {
+    if data.len() < 12 {
+        return Err("packet too short for DNS header".into());
+    }
+
+    let id = u16::from_be_bytes([data[0], data[1]]);
+    let flags1 = data[2];
+    let flags2 = data[3];
+
+    let is_response = (flags1 & 0x80) != 0;
+    let op_code = DnsOpCode::new((flags1 >> 3) & 0x0F);
+    let authoritative_answer = (flags1 & 0x04) != 0;
+    let truncated = (flags1 & 0x02) != 0;
+    let recursion_desired = (flags1 & 0x01) != 0;
+    let recursion_available = (flags2 & 0x80) != 0;
+    let response_code = DnsResponseCode::new(flags2 & 0x0F);
+
+    let question_count = u16::from_be_bytes([data[4], data[5]]);
+    let answer_count = u16::from_be_bytes([data[6], data[7]]);
+    let name_server_count = u16::from_be_bytes([data[8], data[9]]);
+    let additional_count = u16::from_be_bytes([data[10], data[11]]);
+
+    let mut offset = 12;
+    let mut questions = Vec::new();
+
+    for _ in 0..question_count {
+        let name_str = read_dns_name(data, &mut offset)?;
+        if offset + 4 > data.len() {
+            return Err("truncated question record".into());
+        }
+        let qtype = u16::from_be_bytes([data[offset], data[offset + 1]]);
+        let qclass = u16::from_be_bytes([data[offset + 2], data[offset + 3]]);
+        offset += 4;
+
+        let name = DnsName::new(&name_str).map_err(|e| format!("invalid DNS name: {e}"))?;
+        questions.push(DnsQuestion {
+            name,
+            typ: DnsType::new(qtype),
+            class: DnsClass::new(qclass),
+        });
+    }
+
+    Ok(DnsMessage {
+        header: DnsMessageHeader {
+            id,
+            is_response,
+            op_code,
+            authoritative_answer,
+            truncated,
+            recursion_desired,
+            recursion_available,
+            response_code,
+            question_count,
+            answer_count,
+            name_server_count,
+            additional_count,
+        },
+        questions,
+        answers: vec![],
+        name_servers: vec![],
+        additional: vec![],
+    })
+}
+
 fn main() {
     // You can use print statements as follows for debugging, they'll be visible when running tests.
     println!("Logs from your program will appear here!");
@@ -21,16 +135,25 @@ fn main() {
         match udp_socket.recv_from(&mut buf) {
             Ok((size, source)) => {
                 println!("Received {} bytes from {}", size, source);
-                let mut read_buf: FixedBuf<512> = FixedBuf::new();
-                read_buf.write(buf.as_ref()).expect("failed to read");
-                let inc_message = DnsMessage::read(&mut read_buf).unwrap();
+                let inc_message = match parse_dns_message(&buf[..size]) {
+                    Ok(msg) => msg,
+                    Err(e) => {
+                        eprintln!("Failed to parse DNS message: {}", e);
+                        eprintln!("Raw bytes ({} bytes): {:?}", size, &buf[..size]);
+                        eprintln!("As string: {:?}", String::from_utf8_lossy(&buf[..size]));
+                        continue;
+                    }
+                };
                 
-                let question = inc_message.questions[0].clone();
+                let mut answers = vec![];
 
-                let answer = DnsRecord::A(
-                    question.name.clone(),
-                    Ipv4Addr::new(127, 0, 0, 1),
-                );
+                inc_message.questions.iter().for_each(|question| {
+                    println!("Question.name: {:?}", question.name);
+                    answers.push(DnsRecord::A(
+                        question.name.clone(),
+                        Ipv4Addr::new(127, 0, 0, 1),
+                    ))
+                });
 
                 let message = DnsMessage {
                     header: DnsMessageHeader {
@@ -42,13 +165,13 @@ fn main() {
                         recursion_desired: inc_message.header.recursion_desired,
                         recursion_available: false,
                         response_code: DnsResponseCode::NotImplemented,
-                        question_count: 1,
-                        answer_count: 1,
+                        question_count: inc_message.questions.len() as u16,
+                        answer_count: answers.len() as u16,
                         name_server_count: 0,
                         additional_count: 0,
                     },
-                    questions: vec![question],
-                    answers: vec![answer],
+                    questions: inc_message.questions.clone(),
+                    answers: answers,
                     name_servers: vec![],
                     additional: vec![],
                 };
