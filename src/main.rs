@@ -23,18 +23,12 @@ fn main() {
                 println!("Received {} bytes from {}", size, source);
                 let mut read_buf: FixedBuf<512> = FixedBuf::new();
                 read_buf.write(buf.as_ref()).expect("failed to read");
-                eprintln!(" ---> {}", read_buf.len());
                 let inc_message = DnsMessage::read(&mut read_buf).unwrap();
-                eprintln!("Inc message: {:?}", inc_message);
                 
-                let question = DnsQuestion {
-                    name: DnsName::new("codecrafters.io").unwrap(),
-                    typ: DnsType::A,
-                    class: DnsClass::Internet,
-                };
+                let question = inc_message.questions[0].clone();
 
                 let answer = DnsRecord::A(
-                    DnsName::new("codecrafters.io").unwrap(),
+                    question.name.clone(),
                     Ipv4Addr::new(127, 0, 0, 1),
                 );
 
