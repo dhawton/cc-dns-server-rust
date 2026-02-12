@@ -1,6 +1,11 @@
-use rustdns::{Class, Message, QR, Type};
+use dns_server::{
+    DnsClass, DnsMessage, DnsMessageHeader, DnsName, DnsOpCode, DnsQuestion,
+    DnsRecord, DnsResponseCode, DnsType
+};
+use std::net::Ipv4Addr;
 #[allow(unused_imports)]
 use std::net::UdpSocket;
+use fixed_buffer::FixedBuf;
 
 fn main() {
     // You can use print statements as follows for debugging, they'll be visible when running tests.
@@ -15,16 +20,44 @@ fn main() {
                 println!("Received {} bytes from {}", size, source);
                 // Hardcoded response for now
                 let request_id = u16::from_be_bytes([buf[0], buf[1]]);
-                let mut message = Message::default();
-                message.id = request_id;
-                message.qr = QR::Response;
-
-                message.add_question("codecrafters.io", Type::A, Class::Internet);
                 
-                let response = message.to_vec().unwrap();
+                let question = DnsQuestion {
+                    name: DnsName::new("codecrafters.io").unwrap(),
+                    typ: DnsType::A,
+                    class: DnsClass::Internet,
+                };
+
+                let answer = DnsRecord::A(
+                    DnsName::new("codecrafters.io").unwrap(),
+                    Ipv4Addr::new(127, 0, 0, 1),
+                );
+
+                let message = DnsMessage {
+                    header: DnsMessageHeader {
+                        id: request_id,
+                        is_response: true,
+                        op_code: DnsOpCode::Query,
+                        authoritative_answer: false,
+                        truncated: false,
+                        recursion_desired: false,
+                        recursion_available: false,
+                        response_code: DnsResponseCode::NoError,
+                        question_count: 1,
+                        answer_count: 1,
+                        name_server_count: 0,
+                        additional_count: 0,
+                    },
+                    questions: vec![question],
+                    answers: vec![answer],
+                    name_servers: vec![],
+                    additional: vec![],
+                };
+                
+                let mut buf: FixedBuf<4096> = FixedBuf::new();
+                message.write(&mut buf).expect("panic");
 
                 udp_socket
-                    .send_to(&response, source)
+                    .send_to(&buf.read_bytes(buf.len()), source)
                     .expect("Failed to send response");
             }
             Err(e) => {
