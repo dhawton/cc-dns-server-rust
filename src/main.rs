@@ -3,6 +3,7 @@ use dns_server::{
     DnsClass, DnsMessage, DnsMessageHeader, DnsName, DnsOpCode, DnsQuestion,
     DnsRecord, DnsResponseCode, DnsType
 };
+use std::env;
 #[allow(unused_imports)]
 use std::io::{Read, Write};
 use std::net::Ipv4Addr;
@@ -125,8 +126,16 @@ fn parse_dns_message(data: &[u8]) -> Result<DnsMessage, String> {
 }
 
 fn main() {
-    // You can use print statements as follows for debugging, they'll be visible when running tests.
-    println!("Logs from your program will appear here!");
+    let args: Vec<String> = env::args().collect();
+    println!("Args: {:?}", args);
+
+    let resolver: Option<String> = args.windows(2)
+        .find(|pair| pair[0] == "--resolver")
+        .map(|pair| pair[1].clone());
+
+    if let Some(ref addr) = resolver {
+        println!("Using resolver: {}", addr);
+    }
 
     let udp_socket = UdpSocket::bind("127.0.0.1:2053").expect("Failed to bind to address");
     let mut buf = [0; 512];
@@ -147,13 +156,57 @@ fn main() {
                 
                 let mut answers = vec![];
 
-                inc_message.questions.iter().for_each(|question| {
-                    println!("Question.name: {:?}", question.name);
-                    answers.push(DnsRecord::A(
-                        question.name.clone(),
-                        Ipv4Addr::new(127, 0, 0, 1),
-                    ))
-                });
+                for question in &inc_message.questions {
+                    if let Some(ref resolver_addr) = resolver {
+                        // Build a single-question query using rustdns
+                        let mut query = rustdns::Message::default();
+                        query.add_question(
+                            question.name.inner(),
+                            rustdns::types::Type::A,
+                            rustdns::types::Class::Internet,
+                        );
+
+                        match query.to_vec() {
+                            Ok(query_bytes) => {
+                                let fwd_socket = UdpSocket::bind("0.0.0.0:0")
+                                    .expect("failed to bind forwarding socket");
+                                fwd_socket
+                                    .set_read_timeout(Some(std::time::Duration::new(5, 0)))
+                                    .expect("failed to set read timeout");
+                                fwd_socket
+                                    .send_to(&query_bytes, resolver_addr)
+                                    .expect("failed to send to resolver");
+
+                                let mut resp_buf = [0u8; 4096];
+                                match fwd_socket.recv(&mut resp_buf) {
+                                    Ok(len) => {
+                                        match rustdns::Message::from_slice(&resp_buf[..len]) {
+                                            Ok(resp) => {
+                                                for record in &resp.answers {
+                                                    if let rustdns::Resource::A(ip) = &record.resource {
+                                                        answers.push(DnsRecord::A(
+                                                            question.name.clone(),
+                                                            *ip,
+                                                        ));
+                                                    }
+                                                }
+                                            }
+                                            Err(e) => eprintln!("Failed to parse resolver response: {}", e),
+                                        }
+                                    }
+                                    Err(e) => eprintln!("Failed to receive from resolver: {}", e),
+                                }
+                            }
+                            Err(e) => eprintln!("Failed to encode query: {}", e),
+                        }
+                    } else {
+                        // No resolver, return hardcoded 127.0.0.1
+                        answers.push(DnsRecord::A(
+                            question.name.clone(),
+                            Ipv4Addr::new(127, 0, 0, 1),
+                        ));
+                    }
+                }
 
                 let message = DnsMessage {
                     header: DnsMessageHeader {
