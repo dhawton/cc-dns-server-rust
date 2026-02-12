@@ -1,7 +1,10 @@
+#[allow(unused_imports)]
 use dns_server::{
     DnsClass, DnsMessage, DnsMessageHeader, DnsName, DnsOpCode, DnsQuestion,
     DnsRecord, DnsResponseCode, DnsType
 };
+#[allow(unused_imports)]
+use std::io::{Read, Write};
 use std::net::Ipv4Addr;
 #[allow(unused_imports)]
 use std::net::UdpSocket;
@@ -18,8 +21,11 @@ fn main() {
         match udp_socket.recv_from(&mut buf) {
             Ok((size, source)) => {
                 println!("Received {} bytes from {}", size, source);
-                // Hardcoded response for now
-                let request_id = u16::from_be_bytes([buf[0], buf[1]]);
+                let mut read_buf: FixedBuf<512> = FixedBuf::new();
+                read_buf.write(buf.as_ref()).expect("failed to read");
+                eprintln!(" ---> {}", read_buf.len());
+                let inc_message = DnsMessage::read(&mut read_buf).unwrap();
+                eprintln!("Inc message: {:?}", inc_message);
                 
                 let question = DnsQuestion {
                     name: DnsName::new("codecrafters.io").unwrap(),
@@ -34,14 +40,14 @@ fn main() {
 
                 let message = DnsMessage {
                     header: DnsMessageHeader {
-                        id: request_id,
+                        id: inc_message.header.id,
                         is_response: true,
-                        op_code: DnsOpCode::Query,
+                        op_code: inc_message.header.op_code,
                         authoritative_answer: false,
                         truncated: false,
-                        recursion_desired: false,
+                        recursion_desired: inc_message.header.recursion_desired,
                         recursion_available: false,
-                        response_code: DnsResponseCode::NoError,
+                        response_code: DnsResponseCode::NotImplemented,
                         question_count: 1,
                         answer_count: 1,
                         name_server_count: 0,
